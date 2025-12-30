@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 - Nothing yet
 
+## [0.4.1] - 2025-12-30
+- Tiny doc fix
+- Cleanup default deps
+  - get rid of regex dep unless macrotest feature is used(only used for running our tests)
+  - get rid of glob, was unused anyways
+
 ## [0.4.0] - 2025-12-23
 - Fix nightly feature with latest toolchain
 
