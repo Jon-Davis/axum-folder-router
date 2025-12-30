@@ -20,14 +20,15 @@ proc-macro = true
 nightly = []
 # Adds some debug logging
 debug = []
+# Used for working around macrotest behaviour, not useful outside of testing
+macrotest = ["dep:regex"]
 default = []
 
 [dependencies]
 syn = { version = "2.0", features = ["full"] }
 quote = "1.0"
 proc-macro2 = "1.0"
-glob = "0.3"
-regex = "1.12"
+regex = { version = "1.12", optional = true }
 
 [dev-dependencies]
 anyhow = "1.0"

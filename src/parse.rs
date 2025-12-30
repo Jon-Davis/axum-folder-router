@@ -32,7 +32,7 @@ impl FolderRouterArgs {
     }
 
     // This is a workaround for macrotest behaviour
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "macrotest")]
     fn get_manifest_dir() -> String {
         use regex::Regex;
         let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or("./".to_string());
@@ -45,7 +45,7 @@ impl FolderRouterArgs {
         }
     }
 
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(feature = "macrotest"))]
     fn get_manifest_dir() -> String {
         std::env::var("CARGO_MANIFEST_DIR").unwrap_or("./".to_string())
     }
