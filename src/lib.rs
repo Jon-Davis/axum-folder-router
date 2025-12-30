@@ -151,7 +151,7 @@ This enables us to use the unstable [`track_path`](https://doc.rust-lang.org/bet
 
 ### Stable Rust (requires `build.rs`)
 
-On stable, you'll need to add this `build.rs` to your project root:
+On stable, you'll need to add this `build.rs` to your crate root:
 ```rust
 fn main() {
    // Watch routes folder, so it picks up new routes
