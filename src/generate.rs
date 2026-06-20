@@ -394,7 +394,7 @@ fn emit_into(
     base: &[String],
     current_fb: &Option<FallbackRef>,
     mod_namespace: &syn::Path,
-    state_type: &syn::Ident,
+    state_type: &syn::Type,
 ) -> TokenStream {
     let mut body = TokenStream::new();
 
@@ -446,7 +446,7 @@ fn boundary_router(
     node: &RouteNode,
     inherited_fb: &Option<FallbackRef>,
     mod_namespace: &syn::Path,
-    state_type: &syn::Ident,
+    state_type: &syn::Type,
 ) -> TokenStream {
     let own_fb: Option<FallbackRef> = node.fallback.map(|kind| {
         let mut segments = node.mod_segments.clone();

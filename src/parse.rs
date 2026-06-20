@@ -7,7 +7,6 @@ use quote::ToTokens;
 use syn::{
     parse::{Parse, ParseStream},
     parse_file,
-    Ident,
     Item,
     LitStr,
     Result,
@@ -15,10 +14,13 @@ use syn::{
     Visibility,
 };
 
-#[derive(Debug)]
 pub struct FolderRouterArgs {
     pub path: String,
-    pub state_type: Ident,
+    /// The app state type the generated router is parameterized over. Parsed as
+    /// a full `syn::Type` (not just an `Ident`) so callers can pass a reference
+    /// type like `&'static AppState` and have the per-request `State` clone be a
+    /// pointer copy rather than a deep clone.
+    pub state_type: syn::Type,
 }
 
 impl FolderRouterArgs {
@@ -54,7 +56,7 @@ impl Parse for FolderRouterArgs {
     fn parse(input: ParseStream) -> Result<Self> {
         let path_lit = input.parse::<LitStr>()?;
         input.parse::<Token![,]>()?;
-        let state_type = input.parse::<Ident>()?;
+        let state_type = input.parse::<syn::Type>()?;
 
         Ok(FolderRouterArgs {
             path: path_lit.value(),
