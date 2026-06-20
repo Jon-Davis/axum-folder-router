@@ -22,13 +22,11 @@ pub struct FolderRouterArgs {
 }
 
 impl FolderRouterArgs {
-    pub fn abs_norm_path(&self) -> PathBuf {
-        let base_path = self.path.clone();
-
+    /// The route directory as an absolute path, resolved against the Cargo
+    /// manifest directory.
+    pub fn abs_path(&self) -> PathBuf {
         let manifest_dir = Self::get_manifest_dir();
-        let base_dir = Path::new(&manifest_dir).join(&base_path);
-
-        base_dir
+        Path::new(&manifest_dir).join(&self.path)
     }
 
     // This is a workaround for macrotest behaviour
@@ -36,7 +34,9 @@ impl FolderRouterArgs {
     fn get_manifest_dir() -> String {
         use regex::Regex;
         let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or("./".to_string());
-        let re = Regex::new(r"^(.+)/target/tests/axum-folder-router/[A-Za-z0-9]{42}$").unwrap();
+        // Match both `/` and `\` separators so this works on Windows too.
+        let re = Regex::new(r"^(.+)[/\\]target[/\\]tests[/\\]axum-folder-router[/\\][A-Za-z0-9]{42}$")
+            .unwrap();
 
         if let Some(captures) = re.captures(&dir) {
             captures.get(1).unwrap().as_str().to_string()
@@ -97,34 +97,83 @@ pub fn methods_for_route(route_path: &PathBuf) -> Vec<&'static str> {
     // Iterate through methods to ensure consistent order
     allowed_methods
         .into_iter()
-        .filter(|elem| {
-            found_methods
-                .clone()
-                .into_iter()
-                .any(|method| method == *elem)
-        })
+        .filter(|elem| found_methods.iter().any(|method| method.as_str() == *elem))
         .collect()
 }
 
-// Collect route.rs files recursively
-pub fn collect_route_files(base_dir: &Path, dir: &Path) -> Vec<(PathBuf, PathBuf)> {
-    let mut routes = Vec::new();
+// Collect `route.rs`, `middleware.rs` and `fallback.rs` files recursively
+pub fn collect_files(
+    base_dir: &Path,
+    dir: &Path,
+    routes: &mut Vec<(PathBuf, PathBuf)>,
+    middleware: &mut Vec<(PathBuf, PathBuf)>,
+    fallback: &mut Vec<(PathBuf, PathBuf)>,
+) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.filter_map(std::result::Result::ok) {
             let path = entry.path();
 
             if path.is_dir() {
-                let mut nested_routes = collect_route_files(base_dir, &path);
-                routes.append(&mut nested_routes);
-            } else if path.file_name().unwrap_or_default() == "route.rs" {
-                if let Ok(rel_dir) = path.strip_prefix(base_dir) {
-                    routes.push((path.clone(), rel_dir.to_path_buf()));
+                collect_files(base_dir, &path, routes, middleware, fallback);
+            } else if let Ok(rel_dir) = path.strip_prefix(base_dir) {
+                match path.file_name().and_then(|n| n.to_str()) {
+                    Some("route.rs") => routes.push((path.clone(), rel_dir.to_path_buf())),
+                    Some("middleware.rs") => middleware.push((path.clone(), rel_dir.to_path_buf())),
+                    Some("fallback.rs") => fallback.push((path.clone(), rel_dir.to_path_buf())),
+                    _ => {}
                 }
             }
         }
     }
-    routes.sort();
-    routes
+}
+
+/// How a router-transform file's function (`pub fn middleware` / `pub fn
+/// fallback`) consumes router state. It's an arity classification, shared by
+/// `middleware.rs` and `fallback.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MiddlewareKind {
+    /// `fn(router) -> router` — wired before state exists.
+    Stateless,
+    /// `fn(router, state) -> router` — receives a clone of the app state value,
+    /// so it can build e.g. `from_fn_with_state` layers.
+    Stateful,
+}
+
+/// Inspects the file at `path` for a `pub fn <fn_name>` and reports how it
+/// consumes state, based on its arity: one parameter (`router`) is
+/// [`MiddlewareKind::Stateless`], two or more (`router, state`) is
+/// [`MiddlewareKind::Stateful`]. Returns `None` when no such function exists.
+///
+/// Only the name/visibility/arity are inspected, not the full signature; a
+/// function with the wrong shape still surfaces as a regular compiler error at
+/// the generated call site.
+fn fn_kind(path: &Path, fn_name: &str) -> Option<MiddlewareKind> {
+    let file_content = fs::read_to_string(path).ok()?;
+    let file = parse_file(&file_content).ok()?;
+
+    file.items.iter().find_map(|item| {
+        let Item::Fn(fn_item) = item else {
+            return None;
+        };
+        if !matches!(fn_item.vis, Visibility::Public(_)) || fn_item.sig.ident != fn_name {
+            return None;
+        }
+        Some(if fn_item.sig.inputs.len() >= 2 {
+            MiddlewareKind::Stateful
+        } else {
+            MiddlewareKind::Stateless
+        })
+    })
+}
+
+/// Kind of the `pub fn middleware` in a `middleware.rs`, or `None` if absent.
+pub fn middleware_kind(path: &Path) -> Option<MiddlewareKind> {
+    fn_kind(path, "middleware")
+}
+
+/// Kind of the `pub fn fallback` in a `fallback.rs`, or `None` if absent.
+pub fn fallback_kind(path: &Path) -> Option<MiddlewareKind> {
+    fn_kind(path, "fallback")
 }
 
 pub struct FolderRouterItem {
@@ -169,33 +218,98 @@ impl ToTokens for FolderRouterItem {
 
 pub struct FolderRouterRoutes {
     routes: Vec<(PathBuf, PathBuf)>,
+    middleware: Vec<(PathBuf, PathBuf, MiddlewareKind)>,
+    fallback: Vec<(PathBuf, PathBuf, MiddlewareKind)>,
 }
 
 impl FolderRouterRoutes {
     pub fn parse_from_path(errors: &mut proc_macro2::TokenStream, path: &Path) -> Self {
-        let routes = collect_route_files(path, path);
-        let path = path.to_str().unwrap();
+        let mut routes = Vec::new();
+        let mut raw_middleware = Vec::new();
+        let mut raw_fallback = Vec::new();
+        collect_files(path, path, &mut routes, &mut raw_middleware, &mut raw_fallback);
+        routes.sort();
+        raw_middleware.sort();
+        raw_fallback.sort();
+
+        let path_cow = path.to_string_lossy();
+        let path_str = path_cow.as_ref();
 
         if routes.is_empty() {
             errors.extend(quote::quote! {
                 compile_error!(concat!("No route.rs files found in the specified directory: '",
-                    #path,
+                    #path_str,
                     "'. Make sure the path is correct and contains route.rs files."
                 ));
             });
         }
 
+        // Every `middleware.rs` must expose a `pub fn middleware`, otherwise the
+        // generated subtree wiring would fail to compile with a confusing error.
+        // Capture each one's arity (stateless vs stateful) while we're here.
+        let mut middleware = Vec::new();
+        for (mw_path, rel) in raw_middleware {
+            if let Some(kind) = middleware_kind(&mw_path) {
+                middleware.push((mw_path, rel, kind));
+            } else {
+                let mw_str = mw_path.to_string_lossy().into_owned();
+                errors.extend(quote::quote! {
+                    compile_error!(concat!(
+                        "`middleware.rs` found but it does not define a `pub fn middleware`: '",
+                        #mw_str,
+                        "'. Define `pub fn middleware(router: axum::Router<S>) -> axum::Router<S>` ",
+                        "or `pub fn middleware(router: axum::Router<S>, state: S) -> axum::Router<S>`."
+                    ));
+                });
+            }
+        }
+
+        // A `fallback.rs` exposes a `pub fn fallback` and applies to its subtree
+        // (its own dir plus all nested routes). Subtrees are composed with
+        // `Router::nest`, so each can own its own fallback; the generated code
+        // threads ancestor fallbacks down so a deeper one is never silently
+        // overridden. (A `fallback.rs` in a catch-all dir is rejected at the
+        // nest site, since axum forbids wildcards in a `nest` prefix.)
+        let mut fallback = Vec::new();
+        for (fb_path, rel) in raw_fallback {
+            if let Some(kind) = fallback_kind(&fb_path) {
+                fallback.push((fb_path, rel, kind));
+            } else {
+                let fb_str = fb_path.to_string_lossy().into_owned();
+                errors.extend(quote::quote! {
+                    compile_error!(concat!(
+                        "`fallback.rs` found but it does not define a `pub fn fallback`: '",
+                        #fb_str,
+                        "'. Define `pub fn fallback(router: axum::Router<S>) -> axum::Router<S>` ",
+                        "or `pub fn fallback(router: axum::Router<S>, state: S) -> axum::Router<S>`."
+                    ));
+                });
+            }
+        }
+
         Self {
             routes,
+            middleware,
+            fallback,
         }
     }
-}
 
-impl IntoIterator for &FolderRouterRoutes {
-    type IntoIter = std::vec::IntoIter<Self::Item>;
-    type Item = (std::path::PathBuf, std::path::PathBuf);
+    /// The discovered `route.rs` files as `(absolute path, path relative to the
+    /// base dir)` pairs, sorted for deterministic output.
+    pub fn routes(&self) -> &[(PathBuf, PathBuf)] {
+        &self.routes
+    }
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.routes.clone().into_iter()
+    /// The discovered `middleware.rs` files as `(absolute path, path relative to
+    /// the base dir, kind)`, sorted for deterministic output.
+    pub fn middleware(&self) -> &[(PathBuf, PathBuf, MiddlewareKind)] {
+        &self.middleware
+    }
+
+    /// The discovered `fallback.rs` files as `(absolute path, path relative to
+    /// the base dir, kind)`, sorted for deterministic output. One per owning
+    /// directory, since each subtree can declare its own fallback.
+    pub fn fallback(&self) -> &[(PathBuf, PathBuf, MiddlewareKind)] {
+        &self.fallback
     }
 }

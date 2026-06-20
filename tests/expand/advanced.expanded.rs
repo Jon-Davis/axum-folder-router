@@ -1,17 +1,12 @@
 /// [folder_router] Running folder_router macro attrs:("examples/advanced/api", AppState) item: struct MyFolderRouter();
 /// [folder_router] Tracking path: "/home/tristand/code/axum-folder-router/examples/advanced/api"
-/// [folder_router] Found route.rs for axum_path: "/files/{*path}", mod_path: ["files", "___path", "route"]
-/// [folder_router] Found methods for axum_path: "/files/{*path}", mod_path: ["files", "___path", "route"], methods: ["get"]
-/// [folder_router] Found route.rs for axum_path: "/files", mod_path: ["files", "route"]
-/// [folder_router] Found methods for axum_path: "/files", mod_path: ["files", "route"], methods: ["get", "post"]
-/// [folder_router] Found route.rs for axum_path: "/ping", mod_path: ["ping", "route"]
-/// [folder_router] Found methods for axum_path: "/ping", mod_path: ["ping", "route"], methods: ["any", "get"]
-/// [folder_router] Found route.rs for axum_path: "/", mod_path: ["route"]
-/// [folder_router] Found methods for axum_path: "/", mod_path: ["route"], methods: ["get", "post"]
-/// [folder_router] Found route.rs for axum_path: "/users/{:id}", mod_path: ["users", "__id", "route"]
-/// [folder_router] Found methods for axum_path: "/users/{:id}", mod_path: ["users", "__id", "route"], methods: ["get"]
-/// [folder_router] Found route.rs for axum_path: "/users", mod_path: ["users", "route"]
-/// [folder_router] Found methods for axum_path: "/users", mod_path: ["users", "route"], methods: ["get", "post"]
+/// [folder_router] Found route.rs for axum_path: "/files/{*path}", mod_path: ["files", "___path", "route"], methods: ["get"]
+/// [folder_router] Found route.rs for axum_path: "/files", mod_path: ["files", "route"], methods: ["get", "post"]
+/// [folder_router] Found route.rs for axum_path: "/ping", mod_path: ["ping", "route"], methods: ["any", "get"]
+/// [folder_router] Found route.rs for axum_path: "/", mod_path: ["route"], methods: ["get", "post"]
+/// [folder_router] Found route.rs for axum_path: "/users/{id}", mod_path: ["users", "__id", "route"], methods: ["get"]
+/// [folder_router] Found route.rs for axum_path: "/users", mod_path: ["users", "route"], methods: ["get", "post"]
+/// [folder_router] Found middleware.rs for dir: ["users"]
 #![feature(prelude_import)]
 #[macro_use]
 extern crate std;
@@ -96,6 +91,26 @@ mod __folder_router__myfolderrouter {
                 "Posted successfully".into_response()
             }
         }
+        #[path = "middleware.rs"]
+        pub mod middleware {
+            use axum::{extract::Request, middleware::Next, response::Response, Router};
+            async fn add_marker(request: Request, next: Next) -> Response {
+                let mut response = next.run(request).await;
+                response
+                    .headers_mut()
+                    .insert(
+                        "x-folder-router-mw",
+                        axum::http::HeaderValue::from_static("users"),
+                    );
+                response
+            }
+            pub fn middleware<S>(router: Router<S>) -> Router<S>
+            where
+                S: Clone + Send + Sync + 'static,
+            {
+                router.route_layer(axum::middleware::from_fn(add_marker))
+            }
+        }
         #[path = "[id]"]
         pub mod __id {
             #[path = "route.rs"]
@@ -111,46 +126,113 @@ mod __folder_router__myfolderrouter {
     }
 }
 impl MyFolderRouter {
+    pub fn into_router_with_state(state: AppState) -> axum::Router {
+        let router = {
+            let mut router = axum::Router::<AppState>::new();
+            router = router
+                .route(
+                    "/",
+                    axum::routing::get(__folder_router__myfolderrouter::route::get)
+                        .post(__folder_router__myfolderrouter::route::post),
+                );
+            router = router
+                .route(
+                    "/files",
+                    axum::routing::get(__folder_router__myfolderrouter::files::route::get)
+                        .post(__folder_router__myfolderrouter::files::route::post),
+                );
+            router = router
+                .route(
+                    "/files/{*path}",
+                    axum::routing::get(
+                        __folder_router__myfolderrouter::files::___path::route::get,
+                    ),
+                );
+            router = router
+                .route(
+                    "/ping",
+                    axum::routing::any(__folder_router__myfolderrouter::ping::route::any)
+                        .get(__folder_router__myfolderrouter::ping::route::get),
+                );
+            router = router
+                .merge({
+                    let mut router = axum::Router::<AppState>::new();
+                    router = router
+                        .route(
+                            "/users",
+                            axum::routing::get(
+                                    __folder_router__myfolderrouter::users::route::get,
+                                )
+                                .post(__folder_router__myfolderrouter::users::route::post),
+                        );
+                    router = router
+                        .route(
+                            "/users/{id}",
+                            axum::routing::get(
+                                __folder_router__myfolderrouter::users::__id::route::get,
+                            ),
+                        );
+                    router = __folder_router__myfolderrouter::users::middleware::middleware(
+                        router,
+                    );
+                    router
+                });
+            router
+        };
+        router.with_state(state)
+    }
     pub fn into_router() -> axum::Router<AppState> {
-        let mut router = axum::Router::new();
-        router = router
-            .route(
-                "/files/{*path}",
-                axum::routing::get(
-                    __folder_router__myfolderrouter::files::___path::route::get,
-                ),
-            );
-        router = router
-            .route(
-                "/files",
-                axum::routing::get(__folder_router__myfolderrouter::files::route::get)
-                    .post(__folder_router__myfolderrouter::files::route::post),
-            );
-        router = router
-            .route(
-                "/ping",
-                axum::routing::any(__folder_router__myfolderrouter::ping::route::any)
-                    .get(__folder_router__myfolderrouter::ping::route::get),
-            );
-        router = router
-            .route(
-                "/",
-                axum::routing::get(__folder_router__myfolderrouter::route::get)
-                    .post(__folder_router__myfolderrouter::route::post),
-            );
-        router = router
-            .route(
-                "/users/{:id}",
-                axum::routing::get(
-                    __folder_router__myfolderrouter::users::__id::route::get,
-                ),
-            );
-        router = router
-            .route(
-                "/users",
-                axum::routing::get(__folder_router__myfolderrouter::users::route::get)
-                    .post(__folder_router__myfolderrouter::users::route::post),
-            );
-        router
+        {
+            let mut router = axum::Router::<AppState>::new();
+            router = router
+                .route(
+                    "/",
+                    axum::routing::get(__folder_router__myfolderrouter::route::get)
+                        .post(__folder_router__myfolderrouter::route::post),
+                );
+            router = router
+                .route(
+                    "/files",
+                    axum::routing::get(__folder_router__myfolderrouter::files::route::get)
+                        .post(__folder_router__myfolderrouter::files::route::post),
+                );
+            router = router
+                .route(
+                    "/files/{*path}",
+                    axum::routing::get(
+                        __folder_router__myfolderrouter::files::___path::route::get,
+                    ),
+                );
+            router = router
+                .route(
+                    "/ping",
+                    axum::routing::any(__folder_router__myfolderrouter::ping::route::any)
+                        .get(__folder_router__myfolderrouter::ping::route::get),
+                );
+            router = router
+                .merge({
+                    let mut router = axum::Router::<AppState>::new();
+                    router = router
+                        .route(
+                            "/users",
+                            axum::routing::get(
+                                    __folder_router__myfolderrouter::users::route::get,
+                                )
+                                .post(__folder_router__myfolderrouter::users::route::post),
+                        );
+                    router = router
+                        .route(
+                            "/users/{id}",
+                            axum::routing::get(
+                                __folder_router__myfolderrouter::users::__id::route::get,
+                            ),
+                        );
+                    router = __folder_router__myfolderrouter::users::middleware::middleware(
+                        router,
+                    );
+                    router
+                });
+            router
+        }
     }
 }

@@ -87,6 +87,7 @@ dependencies = [
  "regex",
  "syn",
  "tokio",
+ "tower",
  "trybuild",
 ]
 

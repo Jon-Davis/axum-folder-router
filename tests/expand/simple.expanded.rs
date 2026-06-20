@@ -1,7 +1,6 @@
 /// [folder_router] Running folder_router macro attrs:("examples/simple/api", AppState) item: struct MyFolderRouter();
 /// [folder_router] Tracking path: "/home/tristand/code/axum-folder-router/examples/simple/api"
-/// [folder_router] Found route.rs for axum_path: "/", mod_path: ["route"]
-/// [folder_router] Found methods for axum_path: "/", mod_path: ["route"], methods: ["get"]
+/// [folder_router] Found route.rs for axum_path: "/", mod_path: ["route"], methods: ["get"]
 #![feature(prelude_import)]
 #[macro_use]
 extern crate std;
@@ -28,10 +27,27 @@ mod __folder_router__myfolderrouter {
     }
 }
 impl MyFolderRouter {
+    pub fn into_router_with_state(state: AppState) -> axum::Router {
+        let router = {
+            let mut router = axum::Router::<AppState>::new();
+            router = router
+                .route(
+                    "/",
+                    axum::routing::get(__folder_router__myfolderrouter::route::get),
+                );
+            router
+        };
+        router.with_state(state)
+    }
     pub fn into_router() -> axum::Router<AppState> {
-        let mut router = axum::Router::new();
-        router = router
-            .route("/", axum::routing::get(__folder_router__myfolderrouter::route::get));
-        router
+        {
+            let mut router = axum::Router::<AppState>::new();
+            router = router
+                .route(
+                    "/",
+                    axum::routing::get(__folder_router__myfolderrouter::route::get),
+                );
+            router
+        }
     }
 }
