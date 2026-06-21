@@ -103,25 +103,28 @@ pub fn methods_for_route(route_path: &PathBuf) -> Vec<&'static str> {
         .collect()
 }
 
-// Collect `route.rs`, `middleware.rs` and `fallback.rs` files recursively
+// Collect `route.rs`, `middleware.rs`, `fallback.rs` and `intercept.rs` files
+// recursively
 pub fn collect_files(
     base_dir: &Path,
     dir: &Path,
     routes: &mut Vec<(PathBuf, PathBuf)>,
     middleware: &mut Vec<(PathBuf, PathBuf)>,
     fallback: &mut Vec<(PathBuf, PathBuf)>,
+    intercept: &mut Vec<(PathBuf, PathBuf)>,
 ) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.filter_map(std::result::Result::ok) {
             let path = entry.path();
 
             if path.is_dir() {
-                collect_files(base_dir, &path, routes, middleware, fallback);
+                collect_files(base_dir, &path, routes, middleware, fallback, intercept);
             } else if let Ok(rel_dir) = path.strip_prefix(base_dir) {
                 match path.file_name().and_then(|n| n.to_str()) {
                     Some("route.rs") => routes.push((path.clone(), rel_dir.to_path_buf())),
                     Some("middleware.rs") => middleware.push((path.clone(), rel_dir.to_path_buf())),
                     Some("fallback.rs") => fallback.push((path.clone(), rel_dir.to_path_buf())),
+                    Some("intercept.rs") => intercept.push((path.clone(), rel_dir.to_path_buf())),
                     _ => {}
                 }
             }
@@ -178,6 +181,70 @@ pub fn fallback_kind(path: &Path) -> Option<MiddlewareKind> {
     fn_kind(path, "fallback")
 }
 
+/// The parsed signature of a `pub async fn intercept`: its parameter types in
+/// order (the last of which is the forwarded `Request`) and whether any of them
+/// is a `State<…>` extractor. Unlike middleware/fallback — whose `(router[,
+/// state])` shape is a pure arity classification — an intercept's parameters are
+/// axum extractors, so the macro keeps the full type list to reproduce them on
+/// the generated `from_fn` layer, and uses the presence of `State<…>` (rather
+/// than arity) to decide whether the layer needs the app state.
+#[derive(Clone)]
+pub struct InterceptSig {
+    pub params: Vec<syn::Type>,
+    pub stateful: bool,
+}
+
+/// The identifier of a type's final path segment, peeling references so
+/// `&State<_>` still reports `State`. `None` for non-path types.
+fn type_last_ident(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Path(tp) => tp.path.segments.last().map(|s| s.ident.to_string()),
+        syn::Type::Reference(r) => type_last_ident(&r.elem),
+        _ => None,
+    }
+}
+
+/// Whether a parameter type is an axum `State<…>` extractor, matched by the last
+/// path segment so `State<_>` and `axum::extract::State<_>` both count.
+pub fn is_state_type(ty: &syn::Type) -> bool {
+    type_last_ident(ty).as_deref() == Some("State")
+}
+
+/// Whether a parameter type is the forwarded `Request`, matched by name so
+/// `Request`, `axum::extract::Request` and `http::Request<_>` all count.
+pub fn is_request_type(ty: &syn::Type) -> bool {
+    type_last_ident(ty).as_deref() == Some("Request")
+}
+
+/// Parse the `pub async fn intercept` in an `intercept.rs` into an
+/// [`InterceptSig`], or `None` if no such function exists. Only the
+/// name/visibility and parameter *types* are inspected; the return type and
+/// parameter patterns are left to the generated call site to type-check.
+pub fn intercept_signature(path: &Path) -> Option<InterceptSig> {
+    let file_content = fs::read_to_string(path).ok()?;
+    let file = parse_file(&file_content).ok()?;
+
+    file.items.iter().find_map(|item| {
+        let Item::Fn(fn_item) = item else {
+            return None;
+        };
+        if !matches!(fn_item.vis, Visibility::Public(_)) || fn_item.sig.ident != "intercept" {
+            return None;
+        }
+        let params: Vec<syn::Type> = fn_item
+            .sig
+            .inputs
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::FnArg::Typed(pt) => Some((*pt.ty).clone()),
+                syn::FnArg::Receiver(_) => None,
+            })
+            .collect();
+        let stateful = params.iter().any(is_state_type);
+        Some(InterceptSig { params, stateful })
+    })
+}
+
 pub struct FolderRouterItem {
     item: syn::ItemStruct,
 }
@@ -222,6 +289,64 @@ pub struct FolderRouterRoutes {
     routes: Vec<(PathBuf, PathBuf)>,
     middleware: Vec<(PathBuf, PathBuf, MiddlewareKind)>,
     fallback: Vec<(PathBuf, PathBuf, MiddlewareKind)>,
+    intercept: Vec<(PathBuf, PathBuf, InterceptSig)>,
+}
+
+/// Validate the discovered `intercept.rs` files and pair each with its parsed
+/// signature. An `intercept.rs` must define a `pub async fn intercept` whose
+/// parameters are axum extractors ending in the forwarded `Request` (the macro
+/// then applies it as a per-request `.layer` over the whole subtree, including
+/// the fallback). Files that fail either check emit a `compile_error!` and are
+/// dropped (so no broken layer is generated for them).
+fn parse_intercepts(
+    errors: &mut proc_macro2::TokenStream,
+    raw_intercept: Vec<(PathBuf, PathBuf)>,
+) -> Vec<(PathBuf, PathBuf, InterceptSig)> {
+    let mut intercept = Vec::new();
+    for (ic_path, rel) in raw_intercept {
+        let Some(sig) = intercept_signature(&ic_path) else {
+            let ic_str = ic_path.to_string_lossy().into_owned();
+            errors.extend(quote::quote! {
+                compile_error!(concat!(
+                    "`intercept.rs` found but it does not define a `pub async fn intercept`: '",
+                    #ic_str,
+                    "'. Define `pub async fn intercept(/* extractors… */ req: axum::extract::Request) ",
+                    "-> std::ops::ControlFlow<axum::response::Response, axum::extract::Request>`. ",
+                    "Use a `State<S>` parameter to receive the app state."
+                ));
+            });
+            continue;
+        };
+
+        // The forwarded `Request` must appear exactly once and be the final
+        // parameter: axum requires the body-consuming extractor last, and the
+        // macro appends `Next` after it. (Any other extractors come first.)
+        let req_positions: Vec<usize> = sig
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, ty)| is_request_type(ty))
+            .map(|(i, _)| i)
+            .collect();
+        let req_ok = req_positions.len() == 1 && req_positions[0] == sig.params.len() - 1;
+        if !req_ok {
+            let ic_str = ic_path.to_string_lossy().into_owned();
+            errors.extend(quote::quote! {
+                compile_error!(concat!(
+                    "`intercept.rs` must take exactly one `axum::extract::Request` parameter, ",
+                    "and it must be the *last* parameter (extractors come first): '",
+                    #ic_str,
+                    "'. e.g. `pub async fn intercept(State(s): axum::extract::State<S>, ",
+                    "req: axum::extract::Request) ",
+                    "-> std::ops::ControlFlow<axum::response::Response, axum::extract::Request>`."
+                ));
+            });
+            continue;
+        }
+
+        intercept.push((ic_path, rel, sig));
+    }
+    intercept
 }
 
 impl FolderRouterRoutes {
@@ -229,10 +354,19 @@ impl FolderRouterRoutes {
         let mut routes = Vec::new();
         let mut raw_middleware = Vec::new();
         let mut raw_fallback = Vec::new();
-        collect_files(path, path, &mut routes, &mut raw_middleware, &mut raw_fallback);
+        let mut raw_intercept = Vec::new();
+        collect_files(
+            path,
+            path,
+            &mut routes,
+            &mut raw_middleware,
+            &mut raw_fallback,
+            &mut raw_intercept,
+        );
         routes.sort();
         raw_middleware.sort();
         raw_fallback.sort();
+        raw_intercept.sort();
 
         let path_cow = path.to_string_lossy();
         let path_str = path_cow.as_ref();
@@ -289,10 +423,13 @@ impl FolderRouterRoutes {
             }
         }
 
+        let intercept = parse_intercepts(errors, raw_intercept);
+
         Self {
             routes,
             middleware,
             fallback,
+            intercept,
         }
     }
 
@@ -313,5 +450,12 @@ impl FolderRouterRoutes {
     /// directory, since each subtree can declare its own fallback.
     pub fn fallback(&self) -> &[(PathBuf, PathBuf, MiddlewareKind)] {
         &self.fallback
+    }
+
+    /// The discovered `intercept.rs` files as `(absolute path, path relative to
+    /// the base dir, signature)`, sorted for deterministic output. One per owning
+    /// directory; applied as a per-request layer over that subtree.
+    pub fn intercept(&self) -> &[(PathBuf, PathBuf, InterceptSig)] {
+        &self.intercept
     }
 }

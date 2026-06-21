@@ -269,6 +269,92 @@ A ```fallback.rs``` (or ```middleware.rs```) cannot live in a catch-all director
 (```[...rest]```): such a subtree would have to be nested at a wildcard prefix,
 which axum forbids. This is a compile error.
 
+## Interception
+
+```middleware.rs``` hands you the ```Router``` and makes you write the layer
+plumbing yourself. For the common case — *inspect each request, then either let
+it through (optionally after mutating it) or divert it* — place an
+```intercept.rs``` in a folder instead. You write only the decision; the macro
+generates the layer and always attaches it with ```layer``` (never
+```route_layer```), so it runs over the subtree's routes **and** its fallback. A
+pure access guard is just an intercept that only ever diverts.
+
+The file exposes a ```pub async fn intercept``` returning
+```ControlFlow<Response, Request>```:
+- ```ControlFlow::Continue(req)``` — proceed with the (possibly mutated) request.
+- ```ControlFlow::Break(response)``` — short-circuit with this response.
+
+Its parameters are **axum extractors**, just like a handler's, with one rule: the
+forwarded ```Request``` is the **last** parameter (any extractors come first).
+
+```rust
+use std::ops::ControlFlow;
+use axum::{extract::Request, http::StatusCode, response::{IntoResponse, Response}};
+
+pub async fn intercept(req: Request) -> ControlFlow<Response, Request> {
+    if req.uri().path().ends_with("/secret") {
+        return ControlFlow::Break((StatusCode::FORBIDDEN, "nope").into_response());
+    }
+    ControlFlow::Continue(req)
+}
+```
+
+Because ```Continue``` carries the request forward, an intercept can also augment
+it — e.g. resolve a session and ```req.extensions_mut().insert(principal)``` before
+returning ```Continue(req)``` — so downstream handlers read it via
+```Extension<_>```. (An intercept only sees the request, never the outgoing
+response; reach for ```middleware.rs``` when you need to touch the response on the
+way back out.)
+
+### Extractors
+
+Any **```FromRequestParts```** extractor may precede the ```Request```:
+```State```, ```Path```, ```Query```, ```Extension```, ```Method```, header
+extractors, cookie jars, and so on. Body-consuming **```FromRequest```**
+extractors (```Json```, ```Bytes```, ```Form```, ```String```) are *not* usable:
+the intercept must forward the ```Request``` intact on ```Continue```, and those
+would consume its body. (axum's trait bounds enforce this at compile time.)
+
+The macro reproduces your extractor parameters on the generated layer at the
+```#[folder_router]``` invocation site. It fully-qualifies the two types it
+recognises — the ```Request``` and ```State<…>``` — but **every other extractor
+type must be nameable at the invocation site**: either import it there or write it
+fully qualified in the signature (e.g. ```jar: axum_extra::extract::PrivateCookieJar```).
+
+### Intercept that needs state
+
+State is just the ```State<S>``` extractor, exactly as in a handler — its presence
+makes the intercept state-aware (the macro wires a ```from_fn_with_state``` layer)
+and forces ```into_router_with_state```, just as stateful middleware/fallback does.
+Include a ```State<S>``` parameter whenever the intercept — or any other extractor
+it uses, such as a cookie jar — needs the app state:
+```rust
+use std::ops::ControlFlow;
+use axum::{extract::{Request, State}, response::Response};
+
+# #[derive(Clone)]
+# struct AppState;
+
+pub async fn intercept(State(state): State<AppState>, req: Request) -> ControlFlow<Response, Request> {
+    // inspect `state` (DB pool, session store, ...) to authorize the request
+    let _ = state;
+    ControlFlow::Continue(req)
+}
+```
+
+The return type is plain ```std::ops::ControlFlow``` — this is a ```proc-macro```
+crate, so it can't export a type alias for you. If the signature gets noisy,
+declare a one-liner in your own crate:
+```rust
+use std::ops::ControlFlow;
+use axum::{extract::Request, response::Response};
+
+type Intercept = ControlFlow<Response, Request>;
+```
+
+Like ```middleware.rs```/```fallback.rs```, an ```intercept.rs``` makes its folder
+a boundary and cannot live in a catch-all (```[...rest]```) directory.
+
 ## Avoiding Cache Issues
 
 By default newly created route.rs files may be ignored due to cargo's build-in caching.

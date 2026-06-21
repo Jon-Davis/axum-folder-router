@@ -4,7 +4,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote, ToTokens};
 use syn::LitStr;
 
-use crate::parse::{self, methods_for_route, MiddlewareKind};
+use crate::parse::{self, is_request_type, is_state_type, methods_for_route, InterceptSig, MiddlewareKind};
 
 // A struct representing a directory in the module tree
 #[derive(Debug)]
@@ -13,6 +13,7 @@ struct ModuleDir {
     has_route: bool,
     has_middleware: bool,
     has_fallback: bool,
+    has_intercept: bool,
     children: BTreeMap<String, ModuleDir>,
 }
 
@@ -23,6 +24,7 @@ impl ModuleDir {
             has_route: false,
             has_middleware: false,
             has_fallback: false,
+            has_intercept: false,
             children: BTreeMap::new(),
         }
     }
@@ -44,6 +46,7 @@ impl ModuleDir {
                     "route.rs" => root.has_route = true,
                     "middleware.rs" => root.has_middleware = true,
                     "fallback.rs" => root.has_fallback = true,
+                    "intercept.rs" => root.has_intercept = true,
                     _ => {}
                 }
                 break;
@@ -176,6 +179,15 @@ fn generate_module_hierarchy(dir: &ModuleDir) -> TokenStream {
         result.extend(fallback_mod);
     }
 
+    // Add intercept.rs module if this directory has one
+    if dir.has_intercept {
+        let intercept_mod = quote! {
+            #[path = "intercept.rs"]
+            pub mod intercept;
+        };
+        result.extend(intercept_mod);
+    }
+
     // Add subdirectories
     for child in dir.children.values() {
         let child_name = format_ident!("{}", normalize_module_name(&child.name));
@@ -210,8 +222,12 @@ struct RouteNode {
     // `Some(kind)` if this dir has a `fallback.rs`, recording whether it takes
     // the app state value.
     fallback: Option<MiddlewareKind>,
+    // `Some(sig)` if this dir has an `intercept.rs`, holding its extractor
+    // parameter types (reproduced on the generated layer) and whether it takes
+    // the app state (a `State<…>` param, so stateful means `from_fn_with_state`).
+    intercept: Option<InterceptSig>,
     // normalized module path segments leading to this directory (used to
-    // reference its `middleware`/`fallback` module).
+    // reference its `middleware`/`fallback`/`intercept` module).
     mod_segments: Vec<String>,
 }
 
@@ -282,6 +298,18 @@ fn build_route_tree(routes: &parse::FolderRouterRoutes) -> RouteNode {
         node.fallback = Some(*kind);
     }
 
+    for (_ic_path, rel_path, sig) in routes.intercept() {
+        #[cfg(feature = "debug")]
+        println!(
+            "/// [folder_router] Found intercept.rs (stateful: {:?}) for dir: {:?}",
+            sig.stateful,
+            dir_components(rel_path)
+        );
+
+        let node = node_at(&mut root, &dir_components(rel_path));
+        node.intercept = Some(sig.clone());
+    }
+
     root
 }
 
@@ -320,6 +348,7 @@ fn method_router(
 fn subtree_has_boundary(node: &RouteNode) -> bool {
     node.middleware.is_some()
         || node.fallback.is_some()
+        || node.intercept.is_some()
         || node.children.values().any(subtree_has_boundary)
 }
 
@@ -362,6 +391,7 @@ fn check_catchall(node: &RouteNode, base: &[String], errors: &mut TokenStream) {
 fn tree_needs_state(node: &RouteNode) -> bool {
     node.middleware == Some(MiddlewareKind::Stateful)
         || node.fallback == Some(MiddlewareKind::Stateful)
+        || node.intercept.as_ref().is_some_and(|s| s.stateful)
         || node.children.values().any(tree_needs_state)
 }
 
@@ -432,10 +462,45 @@ fn emit_into(
     body
 }
 
+// Extract `T` from a `State<T>` type (the first type generic argument), if any.
+fn state_inner_type(ty: &syn::Type) -> Option<&syn::Type> {
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let seg = tp.path.segments.last()?;
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    })
+}
+
+// Reproduce an intercept parameter type for the generated wrapper, fully
+// qualifying the two types the macro recognises so the wrapper compiles at the
+// `#[folder_router]` invocation site even when the user only imported them inside
+// `intercept.rs`: the forwarded `Request` becomes `axum::extract::Request`, and
+// `State<T>` becomes `axum::extract::State<T>` (its inner `T` — typically the
+// macro's state type — must be nameable at the site, which it is). Any other
+// extractor is emitted verbatim, so its type must be nameable at the invocation
+// site too: import it there or write it fully qualified in the signature.
+fn requalify_intercept_type(ty: &syn::Type) -> TokenStream {
+    if is_request_type(ty) {
+        return quote! { axum::extract::Request };
+    }
+    if is_state_type(ty) {
+        if let Some(inner) = state_inner_type(ty) {
+            return quote! { axum::extract::State<#inner> };
+        }
+    }
+    quote! { #ty }
+}
+
 // Build a self-contained `Router` for a boundary `node`, mounted (by the caller)
 // at its prefix. Routes inside are relative (start at "/"). Applies this
-// subtree's fallback then its middleware. Used for the root and every nested
-// boundary.
+// subtree's fallback, then its intercept, then its middleware. Used for the root
+// and every nested boundary.
 //
 // Fallback resolution is explicit (not left to axum's nesting, which lets an
 // ancestor fallback silently override a deeper one through a fallback-less
@@ -466,6 +531,45 @@ fn boundary_router(
         // non-transparent so the descendant's fallback isn't overridden.
         body.extend(quote! {
             router = router.fallback(|| async { axum::http::StatusCode::NOT_FOUND });
+        });
+    }
+
+    // Per-request interception, applied below the fallback (so it gates the
+    // fallback too) and above any same-folder `middleware` (which wraps it). The
+    // user writes only the decision returning `ControlFlow<Response, Request>`;
+    // the macro generates the layer. Always `.layer` (never `route_layer`), so a
+    // guard can never silently skip an unmatched/fallback-served path.
+    if let Some(sig) = &node.intercept {
+        let mut segments = node.mod_segments.clone();
+        segments.push("intercept".to_string());
+        let intercept_path = generate_mod_path_tokens(&segments);
+
+        // Reproduce the intercept's extractor parameters on the generated layer,
+        // forwarding them positionally (the user's own param patterns destructure
+        // them). The `Continue(req)` arm rebinds `req` from the `ControlFlow`
+        // payload, so the macro never needs to know which input was the request.
+        let arg_idents: Vec<_> = (0..sig.params.len())
+            .map(|i| format_ident!("__arg{}", i))
+            .collect();
+        let arg_types: Vec<TokenStream> = sig.params.iter().map(requalify_intercept_type).collect();
+
+        let layer = if sig.stateful {
+            quote! { axum::middleware::from_fn_with_state(state.clone(), __folder_router_intercept) }
+        } else {
+            quote! { axum::middleware::from_fn(__folder_router_intercept) }
+        };
+
+        body.extend(quote! {
+            async fn __folder_router_intercept(
+                #( #arg_idents: #arg_types, )*
+                next: axum::middleware::Next,
+            ) -> axum::response::Response {
+                match #mod_namespace::#intercept_path::intercept(#( #arg_idents ),*).await {
+                    ::core::ops::ControlFlow::Continue(req) => next.run(req).await,
+                    ::core::ops::ControlFlow::Break(resp) => resp,
+                }
+            }
+            router = router.layer(#layer);
         });
     }
 
@@ -563,6 +667,9 @@ pub fn module_tree(
         root.add_to_module_tree(rel_path);
     }
     for (_fb_path, rel_path, _kind) in routes.fallback() {
+        root.add_to_module_tree(rel_path);
+    }
+    for (_ic_path, rel_path, _sig) in routes.intercept() {
         root.add_to_module_tree(rel_path);
     }
 

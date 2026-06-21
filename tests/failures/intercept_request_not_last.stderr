@@ -1,0 +1,7 @@
+error: `intercept.rs` must take exactly one `axum::extract::Request` parameter, and it must be the *last* parameter (extractors come first): '$DIR/target/tests/trybuild/axum-folder-router/../../../../tests/failures/intercept_request_not_last/intercept.rs'. e.g. `pub async fn intercept(State(s): axum::extract::State<S>, req: axum::extract::Request) -> std::ops::ControlFlow<axum::response::Response, axum::extract::Request>`.
+ --> tests/failures/intercept_request_not_last.rs:6:1
+  |
+6 | #[folder_router("../../../../tests/failures/intercept_request_not_last", AppState)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `folder_router` (in Nightly builds, run with -Z macro-backtrace for more info)
