@@ -35,6 +35,7 @@ anyhow = "1.0"
 axum = "0.8"
 tokio = { version = "1.48", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
 trybuild = "1.0"
 macrotest = "1.2"
 

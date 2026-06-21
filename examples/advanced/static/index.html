@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>axum-folder-router · advanced example</title>
+  </head>
+  <body>
+    <h1>Static fallback</h1>
+    <p>
+      You're looking at a file served by <code>api/fallback.rs</code>, which
+      attaches a <code>ServeDir</code> over this folder's subtree. Any request
+      that doesn't match a <code>route.rs</code> falls back to a file in this
+      directory — including <code>/</code> itself, which has no handler and so
+      resolves to this <code>index.html</code>.
+    </p>
+    <p>
+      Try the routes too: <code>GET /ping</code> is handled by a
+      <code>route.rs</code>, while <code>/users</code> is guarded by
+      <code>api/users/intercept.rs</code> (send
+      <code>Authorization: Bearer password</code>).
+    </p>
+  </body>
+</html>
