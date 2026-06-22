@@ -18,6 +18,17 @@ All notable changes to this project will be documented in this file.
   single `route.rs` may expose several verbs (`get`+`post`+…); all land on one
   path item. See `examples/openapi`.
 
+- **`openapi.toml` per-directory config:** control which subtrees appear in the
+  generated spec and how their operations are grouped. Routes are **opt-in by
+  default** — a directory (or any ancestor) must set `include = true` in its
+  `openapi.toml` to appear. An `include = false` on a subdirectory hides that
+  branch even when a parent opted in; a deeper `include = true` re-exposes it.
+  `tag = "name"` groups all operations in the subtree under that OpenAPI tag.
+  `auto_tag = true` derives each child's tag from the first directory segment
+  below the config file's location; a child `openapi.toml` with an explicit `tag`
+  overrides the auto-derived value. Resolution is most-specific-ancestor wins,
+  evaluated per key independently.
+
 - **Fix:** a `middleware.rs`/`fallback.rs`/`intercept.rs` no longer skips the bare
   boundary path when it has a trailing slash. Nested boundaries are now mounted
   with `Router::nest_service` instead of `Router::nest`, so a request to e.g.

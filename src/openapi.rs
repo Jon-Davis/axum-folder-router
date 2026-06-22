@@ -13,7 +13,7 @@
 //! *nameable at the invocation site* (import it there or write it fully qualified),
 //! the same constraint that already applies to `intercept.rs` extractors.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -35,6 +35,17 @@ fn dir_url_segment(raw: &str) -> String {
     }
 }
 
+// Directory components of a relative file path (the filename is dropped).
+// `api/one/route.rs` → `["api", "one"]`; root `route.rs` → `[]`.
+fn dir_components(rel_path: &Path) -> Vec<String> {
+    let mut parts: Vec<String> = rel_path
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    parts.pop(); // drop filename
+    parts
+}
+
 // The absolute URL path for a `route.rs`, derived from its directory components
 // (the trailing `route.rs` is dropped). A root-level `route.rs` yields "/".
 //
@@ -43,12 +54,10 @@ fn dir_url_segment(raw: &str) -> String {
 // reconstructs the absolute path, deriving it straight from the rel path is
 // equivalent and simpler than replaying the nest logic.
 fn route_url(rel_path: &Path) -> String {
-    let mut segments: Vec<String> = rel_path
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().to_string())
+    let url: Vec<String> = dir_components(rel_path)
+        .iter()
+        .map(|s| dir_url_segment(s))
         .collect();
-    segments.pop(); // drop "route.rs"
-    let url: Vec<String> = segments.iter().map(|s| dir_url_segment(s)).collect();
     if url.is_empty() {
         "/".to_string()
     } else {
@@ -228,8 +237,12 @@ fn split_doc(doc: &str) -> (String, Option<String>) {
 
 // Build an `Operation` expression for one verb handler, pushing any referenced
 // component schemas into `__schemas` along the way.
-fn operation_tokens(op: &OperationMeta, url: &str) -> TokenStream {
+fn operation_tokens(op: &OperationMeta, url: &str, tag: Option<&str>) -> TokenStream {
     let mut builder = quote! { utoipa::openapi::path::OperationBuilder::new() };
+
+    if let Some(t) = tag {
+        builder = quote! { #builder.tag(#t) };
+    }
 
     if let Some(doc) = &op.doc {
         let (summary, description) = split_doc(doc);
@@ -341,12 +354,12 @@ fn operation_tokens(op: &OperationMeta, url: &str) -> TokenStream {
 }
 
 // Build the `PathItem` for one `route.rs` (all its verbs at one URL).
-fn path_item_tokens(ops: &[OperationMeta], url: &str) -> Option<TokenStream> {
+fn path_item_tokens(ops: &[OperationMeta], url: &str, tag: Option<&str>) -> Option<TokenStream> {
     // Pair each verb with its `HttpMethod`, dropping the unrepresentable ones.
     let methods: Vec<(TokenStream, TokenStream)> = ops
         .iter()
         .filter_map(|op| {
-            http_method_tokens(op.method).map(|m| (m, operation_tokens(op, url)))
+            http_method_tokens(op.method).map(|m| (m, operation_tokens(op, url, tag)))
         })
         .collect();
 
@@ -367,6 +380,86 @@ fn path_item_tokens(ops: &[OperationMeta], url: &str) -> Option<TokenStream> {
     })
 }
 
+// Per-directory configuration read from `openapi.toml`.
+struct OpenApiConfig {
+    include: Option<bool>,
+    tag: Option<String>,
+    auto_tag: Option<bool>,
+}
+
+// Parse an `openapi.toml` file. Returns the config on success or an error
+// message to be surfaced as a `compile_error!`.
+fn read_config(path: &Path) -> Result<OpenApiConfig, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let table: toml::Table = content
+        .parse()
+        .map_err(|e| format!("invalid TOML in {}: {e}", path.display()))?;
+    Ok(OpenApiConfig {
+        include: table.get("include").and_then(toml::Value::as_bool),
+        tag: table.get("tag").and_then(toml::Value::as_str).map(str::to_string),
+        auto_tag: table.get("auto_tag").and_then(toml::Value::as_bool),
+    })
+}
+
+// Load all `openapi.toml` files into `(dir_components, OpenApiConfig)` pairs.
+// Returns the config list on success; on error, extends `errors` with
+// `compile_error!` tokens and returns `None`.
+fn load_configs(
+    config_files: &[(PathBuf, PathBuf)],
+    errors: &mut TokenStream,
+) -> Option<Vec<(Vec<String>, OpenApiConfig)>> {
+    let mut configs = Vec::new();
+    let mut had_error = false;
+    for (abs, rel) in config_files {
+        match read_config(abs) {
+            Ok(cfg) => configs.push((dir_components(rel), cfg)),
+            Err(msg) => {
+                errors.extend(quote! { compile_error!(#msg); });
+                had_error = true;
+            }
+        }
+    }
+    if had_error { None } else { Some(configs) }
+}
+
+// Walk ancestors (most-specific first) looking for the first config that sets
+// `include`. Default is `false` (opt-in).
+fn resolve_include(dir: &[String], configs: &[(Vec<String>, OpenApiConfig)]) -> bool {
+    for prefix_len in (0..=dir.len()).rev() {
+        let prefix = &dir[..prefix_len];
+        if let Some((_, cfg)) = configs.iter().find(|(cd, _)| cd.as_slice() == prefix) {
+            if let Some(inc) = cfg.include {
+                return inc;
+            }
+        }
+    }
+    false
+}
+
+// Walk ancestors (most-specific first) looking for the first config that sets
+// `tag` or `auto_tag`. Returns the resolved tag string, if any.
+fn resolve_tag(dir: &[String], configs: &[(Vec<String>, OpenApiConfig)]) -> Option<String> {
+    for prefix_len in (0..=dir.len()).rev() {
+        let prefix = &dir[..prefix_len];
+        if let Some((c_dir, cfg)) = configs.iter().find(|(cd, _)| cd.as_slice() == prefix) {
+            if cfg.auto_tag == Some(true) || cfg.tag.is_some() {
+                if cfg.auto_tag == Some(true) {
+                    let c_len = c_dir.len();
+                    if c_len < dir.len() {
+                        // Use the segment immediately below c_dir toward dir.
+                        return Some(dir[c_len].clone());
+                    }
+                    // Route sits directly in c_dir — fall back to explicit tag.
+                    return cfg.tag.clone();
+                }
+                return cfg.tag.clone();
+            }
+        }
+    }
+    None
+}
+
 /// Emit `impl <Struct> { pub fn openapi() -> utoipa::openapi::OpenApi { … } }`,
 /// or an empty stream when the `openapi` flag wasn't set. Independent of router
 /// state, so it is always available regardless of the `into_router` /
@@ -382,11 +475,21 @@ pub fn openapi_impl(
 
     let struct_name = item.struct_name();
 
+    let mut errors = TokenStream::new();
+    let Some(configs) = load_configs(routes.config_files(), &mut errors) else {
+        return errors;
+    };
+
     let mut path_entries: Vec<TokenStream> = Vec::new();
     for (route_path, rel_path) in routes.routes() {
+        let dir = dir_components(rel_path);
+        if !resolve_include(&dir, &configs) {
+            continue;
+        }
+        let tag = resolve_tag(&dir, &configs);
         let url = route_url(rel_path);
         let ops = parse::operations_for_route(route_path);
-        if let Some(path_item) = path_item_tokens(&ops, &url) {
+        if let Some(path_item) = path_item_tokens(&ops, &url, tag.as_deref()) {
             path_entries.push(quote! { .path(#url, #path_item) });
         }
     }

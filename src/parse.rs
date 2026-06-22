@@ -236,8 +236,8 @@ pub fn operations_for_route(route_path: &PathBuf) -> Vec<OperationMeta> {
     ordered
 }
 
-// Collect `route.rs`, `middleware.rs`, `fallback.rs` and `intercept.rs` files
-// recursively
+// Collect `route.rs`, `middleware.rs`, `fallback.rs`, `intercept.rs`, and
+// (when the `openapi` feature is active) `openapi.toml` files recursively.
 pub fn collect_files(
     base_dir: &Path,
     dir: &Path,
@@ -245,19 +245,31 @@ pub fn collect_files(
     middleware: &mut Vec<(PathBuf, PathBuf)>,
     fallback: &mut Vec<(PathBuf, PathBuf)>,
     intercept: &mut Vec<(PathBuf, PathBuf)>,
+    #[cfg(feature = "openapi")] config: &mut Vec<(PathBuf, PathBuf)>,
 ) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.filter_map(std::result::Result::ok) {
             let path = entry.path();
 
             if path.is_dir() {
-                collect_files(base_dir, &path, routes, middleware, fallback, intercept);
+                collect_files(
+                    base_dir,
+                    &path,
+                    routes,
+                    middleware,
+                    fallback,
+                    intercept,
+                    #[cfg(feature = "openapi")]
+                    config,
+                );
             } else if let Ok(rel_dir) = path.strip_prefix(base_dir) {
                 match path.file_name().and_then(|n| n.to_str()) {
                     Some("route.rs") => routes.push((path.clone(), rel_dir.to_path_buf())),
                     Some("middleware.rs") => middleware.push((path.clone(), rel_dir.to_path_buf())),
                     Some("fallback.rs") => fallback.push((path.clone(), rel_dir.to_path_buf())),
                     Some("intercept.rs") => intercept.push((path.clone(), rel_dir.to_path_buf())),
+                    #[cfg(feature = "openapi")]
+                    Some("openapi.toml") => config.push((path.clone(), rel_dir.to_path_buf())),
                     _ => {}
                 }
             }
@@ -423,6 +435,8 @@ pub struct FolderRouterRoutes {
     middleware: Vec<(PathBuf, PathBuf, MiddlewareKind)>,
     fallback: Vec<(PathBuf, PathBuf, MiddlewareKind)>,
     intercept: Vec<(PathBuf, PathBuf, InterceptSig)>,
+    #[cfg(feature = "openapi")]
+    config: Vec<(PathBuf, PathBuf)>,
 }
 
 /// Validate the discovered `intercept.rs` files and pair each with its parsed
@@ -488,6 +502,8 @@ impl FolderRouterRoutes {
         let mut raw_middleware = Vec::new();
         let mut raw_fallback = Vec::new();
         let mut raw_intercept = Vec::new();
+        #[cfg(feature = "openapi")]
+        let mut config = Vec::new();
         collect_files(
             path,
             path,
@@ -495,11 +511,15 @@ impl FolderRouterRoutes {
             &mut raw_middleware,
             &mut raw_fallback,
             &mut raw_intercept,
+            #[cfg(feature = "openapi")]
+            &mut config,
         );
         routes.sort();
         raw_middleware.sort();
         raw_fallback.sort();
         raw_intercept.sort();
+        #[cfg(feature = "openapi")]
+        config.sort();
 
         let path_cow = path.to_string_lossy();
         let path_str = path_cow.as_ref();
@@ -565,6 +585,8 @@ impl FolderRouterRoutes {
             middleware,
             fallback,
             intercept,
+            #[cfg(feature = "openapi")]
+            config,
         }
     }
 
@@ -592,5 +614,12 @@ impl FolderRouterRoutes {
     /// directory; applied as a per-request layer over that subtree.
     pub fn intercept(&self) -> &[(PathBuf, PathBuf, InterceptSig)] {
         &self.intercept
+    }
+
+    /// The discovered `openapi.toml` config files as `(absolute path, path
+    /// relative to the base dir)` pairs, sorted for deterministic output.
+    #[cfg(feature = "openapi")]
+    pub fn config_files(&self) -> &[(PathBuf, PathBuf)] {
+        &self.config
     }
 }

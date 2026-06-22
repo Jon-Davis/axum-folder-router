@@ -152,8 +152,18 @@ Staying true to the macro's purely *syntactic* design, it reads each handler's
 signature tokens and recognizes a small set of axum wrappers by name:
 
 - **Paths, methods, path params, and doc comments** are derived directly from the
-  file tree (`[id]` → a required `{id}` parameter; the first doc line becomes the
-  operation summary, the rest its description).
+  file tree (`[id]` → a required `{id}` parameter). The `///` doc comment on a
+  handler becomes the OpenAPI operation summary (first line) and description
+  (remaining lines):
+
+  ```rust
+  /// List all users.
+  ///
+  /// Returns the full user list. The first line above maps to the operation
+  /// `summary`; everything after the blank line maps to `description`.
+  pub async fn get(State(state): State<AppState>) -> Json<Vec<User>> { ... }
+  ```
+
 - **`Json<T>` / `Form<T>`** parameters become the request body, **`Query<T>`**
   becomes query parameters (via `utoipa::IntoParams`), and a concrete
   **`Json<T>`**, **`Result<Json<T>, _>`**, or tuple return type becomes the `200`
@@ -169,6 +179,59 @@ yields a bodyless `200` — there is nothing to recover syntactically. The `any`
 be **nameable at the `#[folder_router]` site** (import it there or write it fully
 qualified). See [`examples/openapi`](./examples/openapi) for a runnable demo
 (`cargo run --example openapi --features openapi`).
+
+### Scoping and tagging with `openapi.toml`
+
+By default routes are **opt-in**: only subtrees that explicitly enable themselves
+via an `openapi.toml` appear in the generated spec.
+
+Place an `openapi.toml` in any directory inside the router tree. Three keys are
+supported (all optional):
+
+```toml
+include  = true    # bool  — include this subtree in the spec (default: false)
+tag      = "users" # string — group every operation in this subtree under this tag
+auto_tag = true    # bool  — derive each child's tag from its first subdirectory name
+```
+
+**Resolution** is per-key, most-specific-ancestor wins. Walking up from a
+`route.rs` to the router root, the nearest `openapi.toml` that defines the key
+is used. This lets a subtree toggle on and then off again:
+
+```
+src/api/
+├── openapi.toml          # include = true   ← exposes /api/*
+├── route.rs
+├── users/
+│   └── route.rs          # inherits include = true
+└── internal/
+    ├── openapi.toml      # include = false  ← hides /api/internal/*
+    ├── route.rs
+    └── public/
+        ├── openapi.toml  # include = true   ← re-exposes this subtree only
+        └── route.rs
+```
+
+**`auto_tag`** at a directory derives each child's tag from the path segment
+immediately below that directory:
+
+```
+src/api/
+├── openapi.toml          # include = true, auto_tag = true
+├── users/route.rs        # → tag "users"
+├── orders/route.rs       # → tag "orders"
+└── hello/
+    ├── openapi.toml      # tag = "Greetings"  (overrides auto_tag)
+    └── route.rs          # → tag "Greetings"
+```
+
+A `route.rs` that sits **directly** in the `auto_tag` directory (no child segment
+to derive from) falls back to that directory's `tag` key if set, otherwise is
+untagged.
+
+Cache note: both the nightly `track_path` API and the stable `build.rs`
+`rerun-if-changed` already watch the whole routes directory, so adding or editing
+an `openapi.toml` is automatically picked up.
 
 ## License
 

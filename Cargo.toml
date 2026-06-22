@@ -23,7 +23,7 @@ debug = []
 # Emits an `openapi()` constructor (alongside `into_router*`) for any router
 # invoked with the `openapi` flag, building a `utoipa::openapi::OpenApi` document
 # from the route tree. Requires the *consuming* crate to depend on `utoipa = "5"`.
-openapi = []
+openapi = ["dep:toml"]
 # Used for working around macrotest behaviour, not useful outside of testing
 macrotest = ["dep:regex"]
 default = []
@@ -33,6 +33,7 @@ syn = { version = "2.0", features = ["full"] }
 quote = "1.0"
 proc-macro2 = "1.0"
 regex = { version = "1.12", optional = true }
+toml = { version = "0.8", optional = true }
 
 [dev-dependencies]
 anyhow = "1.0"

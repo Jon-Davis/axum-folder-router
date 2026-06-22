@@ -391,8 +391,16 @@ types' fields. The schemas are produced by the compiler from
 site. What is recovered:
 
 - **Paths, methods, path params, doc comments** — from the file tree. A `[id]`
-  directory becomes a required `{id}` parameter (typed as `string`); a handler's
-  first doc line becomes the operation summary and the rest its description.
+  directory becomes a required `{id}` parameter (typed as `string`). The `///`
+  doc comment on a handler becomes the operation summary (first line) and
+  description (remaining lines):
+  ```rust,ignore
+  /// List all users.
+  ///
+  /// Returns the full user list. The first line maps to the OpenAPI operation
+  /// `summary`; everything after the blank line maps to `description`.
+  pub async fn get(State(state): State<AppState>) -> Json<Vec<User>> { ... }
+  ```
 - **Request body** — a ```Json<T>``` or ```Form<T>``` parameter.
 - **Query parameters** — a ```Query<T>``` parameter, expanded via
   ```utoipa::IntoParams```.
@@ -408,6 +416,44 @@ Limitations:
 - Like ```intercept.rs``` extractors, every schema/param type named in a handler
   signature must be **nameable at the ```#[folder_router]``` site** — import it
   there or write it fully qualified.
+
+### Scoping and tagging with `openapi.toml`
+
+By default routes are **opt-in**: only subtrees that explicitly enable themselves
+via an `openapi.toml` appear in the generated spec.
+
+Place an `openapi.toml` in any directory inside the router tree. Three keys are
+supported (all optional):
+```toml
+include  = true    # bool   — include this subtree in the spec (default: false)
+tag      = "users" # string — group every operation under this tag
+auto_tag = true    # bool   — derive each child's tag from its first subdirectory name
+```
+
+Resolution is per-key, most-specific-ancestor wins: walking up from a `route.rs`
+to the router root, the nearest `openapi.toml` that defines the key is used. This
+allows fine-grained opt-in/opt-out:
+```text
+api/
+├── openapi.toml          # include = true
+├── users/route.rs        # ← included
+└── internal/
+    ├── openapi.toml      # include = false  ← hides this subtree
+    ├── route.rs
+    └── public/
+        ├── openapi.toml  # include = true   ← re-exposes only this branch
+        └── route.rs
+```
+
+**`auto_tag`** derives each child subtree's tag from its directory name below the
+config's directory. An explicit `tag` key in a child's own `openapi.toml` overrides
+the auto-derived value. A `route.rs` sitting directly in the `auto_tag` directory
+(no child segment to derive from) falls back to that directory's `tag`, or is
+untagged if `tag` is also absent.
+
+Both the nightly `track_path` API and the stable `build.rs` `rerun-if-changed`
+already watch the whole routes directory, so added/edited `openapi.toml` files are
+picked up automatically.
 
 ## Avoiding Cache Issues
 
