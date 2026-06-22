@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- **Feature `openapi`:** opt in per router with a trailing `openapi` flag
+  (`#[folder_router("api", AppState, openapi)]`) to generate a state-free
+  `openapi()` constructor returning a `utoipa::openapi::OpenApi` built from the
+  route tree. Paths, HTTP methods, `[id]` path parameters, and doc comments come
+  straight from the file tree; `Json<T>`/`Form<T>` parameters, `Query<T>`, and
+  concrete `Json<T>`/`Result<Json<T>, _>` return types are recognized
+  syntactically, with the schemas supplied by `utoipa::ToSchema`/`IntoParams` on
+  the handler types. A `Vec<T>` body/response is emitted as an inline `array` of
+  `T` (with `T`, not `Vec`, registered as the component schema). Requires the
+  consuming crate to depend on `utoipa = "5"`. Opaque return types
+  (`impl IntoResponse`) get a bodyless `200`; `any`/`connect` are omitted. A
+  single `route.rs` may expose several verbs (`get`+`post`+…); all land on one
+  path item. See `examples/openapi`.
+
 - **Fix:** a `middleware.rs`/`fallback.rs`/`intercept.rs` no longer skips the bare
   boundary path when it has a trailing slash. Nested boundaries are now mounted
   with `Router::nest_service` instead of `Router::nest`, so a request to e.g.

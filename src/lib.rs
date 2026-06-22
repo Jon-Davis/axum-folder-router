@@ -24,6 +24,11 @@ caching, which may cause new ```route.rs``` files to be ignored.
   Enables use of unstable [`track_path`](https://doc.rust-lang.org/beta/unstable-book/library-features/track-path.html) feature to [avoid cache issues](#avoiding-cache-issues).
 * **debug** -
   Adds some debug logging
+* **openapi** -
+  Emits an `openapi()` constructor for routers invoked with the `openapi` flag,
+  building a [`utoipa`](https://docs.rs/utoipa) ```OpenApi``` document from the
+  route tree. Requires the consuming crate to depend on ```utoipa = "5"```. See
+  [OpenAPI Generation](#openapi-generation).
 
 # Basic Usage
 
@@ -363,6 +368,47 @@ type Intercept = ControlFlow<Response, Request>;
 Like ```middleware.rs```/```fallback.rs```, an ```intercept.rs``` makes its folder
 a boundary and cannot live in a catch-all (```[...rest]```) directory.
 
+## OpenAPI Generation
+
+With the `openapi` feature enabled and a ```utoipa = "5"``` dependency in your
+crate, add a trailing `openapi` flag to the macro:
+```rust,ignore
+#[folder_router("src/api", AppState, openapi)]
+struct Api();
+```
+Alongside the usual ```into_router```/```into_router_with_state```, this emits a
+state-free constructor:
+```rust,ignore
+let doc: utoipa::openapi::OpenApi = Api::openapi();
+```
+which you can serve (e.g. with ```utoipa-swagger-ui```) or merge into a larger
+document with the ```utoipa::openapi::OpenApiBuilder``` API.
+
+True to the macro's purely *syntactic* design, it inspects each handler's
+signature tokens and recognises a few axum wrappers by name — it never reads your
+types' fields. The schemas are produced by the compiler from
+```utoipa::ToSchema```/```utoipa::IntoParams``` bounds at the ```#[folder_router]```
+site. What is recovered:
+
+- **Paths, methods, path params, doc comments** — from the file tree. A `[id]`
+  directory becomes a required `{id}` parameter (typed as `string`); a handler's
+  first doc line becomes the operation summary and the rest its description.
+- **Request body** — a ```Json<T>``` or ```Form<T>``` parameter.
+- **Query parameters** — a ```Query<T>``` parameter, expanded via
+  ```utoipa::IntoParams```.
+- **Response body** — a concrete ```Json<T>```, ```Result<Json<T>, _>```, or a
+  tuple containing ```Json<T>``` (e.g. ```(StatusCode, Json<T>)```) becomes the
+  `200` response. A ```Vec<T>``` payload becomes an inline `array` of `T` (with
+  `T` registered as the component schema, not `Vec`).
+
+Limitations:
+- An opaque return type (```impl IntoResponse```, ```String```, ```Html<_>```) is
+  unrecoverable, so the operation gets a bodyless `200`.
+- The `any` and `connect` verbs have no single OpenAPI operation and are omitted.
+- Like ```intercept.rs``` extractors, every schema/param type named in a handler
+  signature must be **nameable at the ```#[folder_router]``` site** — import it
+  there or write it fully qualified.
+
 ## Avoiding Cache Issues
 
 By default newly created route.rs files may be ignored due to cargo's build-in caching.
@@ -400,6 +446,8 @@ use quote::quote;
 use syn::parse_macro_input;
 
 mod generate;
+#[cfg(feature = "openapi")]
+mod openapi;
 mod parse;
 
 /// Creates an Axum router module tree & creation function
@@ -440,11 +488,26 @@ pub fn folder_router(attr: TokenStream, item: TokenStream) -> TokenStream {
     let module_tree = generate::module_tree(&args, &item, &routes);
     let router_impl = generate::router_impl(&mut errors, &args, &item, &routes);
 
+    #[cfg(feature = "openapi")]
+    let openapi_impl = openapi::openapi_impl(&args, &item, &routes);
+    #[cfg(not(feature = "openapi"))]
+    let openapi_impl = if args.openapi {
+        quote! {
+            compile_error!(
+                "the `openapi` flag requires the `openapi` feature of `axum-folder-router`: \
+                 `axum-folder-router = { version = \"0.4\", features = [\"openapi\"] }`"
+            );
+        }
+    } else {
+        TokenStream2::new()
+    };
+
     quote! {
       #item
       #errors
       #module_tree
       #router_impl
+      #openapi_impl
     }
     .into()
 }

@@ -16,6 +16,7 @@ by vault81 that adds support for **middleware**, **fallbacks**, and **intercepts
 - **Less boilerplate** — route-mapping code is generated for you
 - **Composable conventions** — drop in `middleware.rs`, `fallback.rs`, or `intercept.rs` per folder
 - **State-aware** — share a typed `AppState` across handlers, middleware, and intercepts
+- **OpenAPI (optional)** — generate a `utoipa` spec from the route tree (feature `openapi`)
 
 ## Conventions
 
@@ -121,6 +122,53 @@ guard can't be bypassed by a trailing slash. Because a service has its state
 baked in at construction, a tree with nested boundaries is built with
 `into_router_with_state(state)` (not `into_router()`), even when every layer is
 state-agnostic.
+
+## OpenAPI generation (feature `openapi`)
+
+Enable the feature and add [`utoipa`](https://docs.rs/utoipa) `5` to your crate:
+
+```toml
+axum-folder-router = { version = "0.4", features = ["openapi"] }
+utoipa = "5"
+```
+
+Then add the `openapi` flag to the macro. Alongside the usual `into_router*`, the
+macro emits a state-free `openapi()` constructor returning a
+`utoipa::openapi::OpenApi`, built from the route tree:
+
+```rust
+use utoipa::ToSchema;
+
+#[derive(ToSchema, serde::Serialize, serde::Deserialize)]
+struct User { id: u64, name: String }
+
+#[folder_router("src/api", AppState, openapi)]
+struct Api();
+
+let doc = Api::openapi(); // serve via utoipa-swagger-ui, or merge into a larger doc
+```
+
+Staying true to the macro's purely *syntactic* design, it reads each handler's
+signature tokens and recognizes a small set of axum wrappers by name:
+
+- **Paths, methods, path params, and doc comments** are derived directly from the
+  file tree (`[id]` → a required `{id}` parameter; the first doc line becomes the
+  operation summary, the rest its description).
+- **`Json<T>` / `Form<T>`** parameters become the request body, **`Query<T>`**
+  becomes query parameters (via `utoipa::IntoParams`), and a concrete
+  **`Json<T>`**, **`Result<Json<T>, _>`**, or tuple return type becomes the `200`
+  response body. The schemas themselves come from `#[derive(ToSchema)]` on `T` —
+  the macro never inspects your types' fields; the compiler does. A **`Vec<T>`**
+  body/response (e.g. `Json<Vec<T>>`) is emitted as an inline `array` of `T`
+  refs, with `T` (not `Vec`) registered as the component schema.
+
+Limitations: an opaque return type (`impl IntoResponse`, `String`, `Html<_>`)
+yields a bodyless `200` — there is nothing to recover syntactically. The `any` and
+`connect` verbs have no single OpenAPI operation and are omitted. As with
+`intercept.rs` extractors, any schema/param type named in a handler signature must
+be **nameable at the `#[folder_router]` site** (import it there or write it fully
+qualified). See [`examples/openapi`](./examples/openapi) for a runnable demo
+(`cargo run --example openapi --features openapi`).
 
 ## License
 

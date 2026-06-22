@@ -20,6 +20,10 @@ proc-macro = true
 nightly = []
 # Adds some debug logging
 debug = []
+# Emits an `openapi()` constructor (alongside `into_router*`) for any router
+# invoked with the `openapi` flag, building a `utoipa::openapi::OpenApi` document
+# from the route tree. Requires the *consuming* crate to depend on `utoipa = "5"`.
+openapi = []
 # Used for working around macrotest behaviour, not useful outside of testing
 macrotest = ["dep:regex"]
 default = []
@@ -38,6 +42,17 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs"] }
 trybuild = "1.0"
 macrotest = "1.2"
+# Exercised by the `openapi`-gated example/tests; the macro itself emits code
+# that references the consuming crate's own `utoipa` dependency.
+utoipa = "5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# The OpenAPI demo only compiles with the `openapi` feature (and its `utoipa`
+# dev-dependency); gate it so a plain `cargo build --examples` stays green.
+[[example]]
+name = "openapi"
+required-features = ["openapi"]
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

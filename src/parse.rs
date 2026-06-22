@@ -21,6 +21,11 @@ pub struct FolderRouterArgs {
     /// type like `&'static AppState` and have the per-request `State` clone be a
     /// pointer copy rather than a deep clone.
     pub state_type: syn::Type,
+    /// Whether the invocation requested OpenAPI generation via a trailing
+    /// `, openapi` flag (e.g. `#[folder_router("api", AppState, openapi)]`). When
+    /// set — and the crate's `openapi` feature is enabled — the macro emits an
+    /// `openapi()` constructor alongside `into_router*`.
+    pub openapi: bool,
 }
 
 impl FolderRouterArgs {
@@ -58,9 +63,27 @@ impl Parse for FolderRouterArgs {
         input.parse::<Token![,]>()?;
         let state_type = input.parse::<syn::Type>()?;
 
+        // Optional trailing flags, comma-separated. Currently only `openapi`.
+        let mut openapi = false;
+        while input.parse::<Token![,]>().is_ok() {
+            if input.is_empty() {
+                break; // tolerate a trailing comma
+            }
+            let flag = input.parse::<syn::Ident>()?;
+            if flag == "openapi" {
+                openapi = true;
+            } else {
+                return Err(syn::Error::new(
+                    flag.span(),
+                    format!("unknown `folder_router` flag `{flag}`; expected `openapi`"),
+                ));
+            }
+        }
+
         Ok(FolderRouterArgs {
             path: path_lit.value(),
             state_type,
+            openapi,
         })
     }
 }
@@ -101,6 +124,116 @@ pub fn methods_for_route(route_path: &PathBuf) -> Vec<&'static str> {
         .into_iter()
         .filter(|elem| found_methods.iter().any(|method| method.as_str() == *elem))
         .collect()
+}
+
+/// Metadata about a single HTTP-verb handler in a `route.rs`, collected for
+/// `OpenAPI` generation. Like the rest of this crate it is purely *syntactic*: the
+/// parameter and return types are the tokens as written, and the actual schemas
+/// are recovered later by the compiler via `utoipa::ToSchema`/`IntoParams` bounds
+/// at the generated call site.
+#[cfg(feature = "openapi")]
+#[derive(Clone)]
+pub struct OperationMeta {
+    /// The HTTP verb (handler fn name), e.g. `"get"`.
+    pub method: &'static str,
+    /// The handler's parameter types, in order (axum extractors).
+    pub params: Vec<syn::Type>,
+    /// The handler's return type, if written explicitly (`None` for `-> ()`).
+    pub ret: Option<syn::Type>,
+    /// The handler's doc comment (joined `#[doc]` lines, trimmed), if any. Its
+    /// first line becomes the operation summary, the remainder the description.
+    pub doc: Option<String>,
+}
+
+/// Join a function's `#[doc = "…"]` attributes into a single trimmed string,
+/// returning `None` when there are none.
+#[cfg(feature = "openapi")]
+fn doc_string(attrs: &[syn::Attribute]) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for attr in attrs {
+        if !attr.path().is_ident("doc") {
+            continue;
+        }
+        if let syn::Meta::NameValue(nv) = &attr.meta {
+            if let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(s),
+                ..
+            }) = &nv.value
+            {
+                // rustdoc strips a single leading space from each `///` line.
+                lines.push(s.value().strip_prefix(' ').map_or_else(|| s.value(), str::to_owned));
+            }
+        }
+    }
+    let joined = lines.join("\n");
+    let trimmed = joined.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Parse a `route.rs` into per-verb [`OperationMeta`], mirroring the verb
+/// detection in [`methods_for_route`] but also capturing each handler's
+/// parameter/return types and doc comment for `OpenAPI` emission. Returned in the
+/// same canonical verb order as [`methods_for_route`].
+#[cfg(feature = "openapi")]
+pub fn operations_for_route(route_path: &PathBuf) -> Vec<OperationMeta> {
+    let allowed_methods = [
+        "any", "get", "post", "put", "delete", "patch", "head", "options", "trace", "connect",
+    ];
+
+    let Ok(file_content) = fs::read_to_string(route_path) else {
+        return Vec::new();
+    };
+    let Ok(file) = parse_file(&file_content) else {
+        return Vec::new();
+    };
+
+    let mut found: Vec<OperationMeta> = Vec::new();
+    for item in &file.items {
+        let Item::Fn(fn_item) = item else { continue };
+        if !matches!(fn_item.vis, Visibility::Public(_)) || fn_item.sig.asyncness.is_none() {
+            continue;
+        }
+        let Some(method) = allowed_methods
+            .into_iter()
+            .find(|m| fn_item.sig.ident == m)
+        else {
+            continue;
+        };
+
+        let params = fn_item
+            .sig
+            .inputs
+            .iter()
+            .filter_map(|arg| match arg {
+                syn::FnArg::Typed(pt) => Some((*pt.ty).clone()),
+                syn::FnArg::Receiver(_) => None,
+            })
+            .collect();
+        let ret = match &fn_item.sig.output {
+            syn::ReturnType::Type(_, ty) => Some((**ty).clone()),
+            syn::ReturnType::Default => None,
+        };
+
+        found.push(OperationMeta {
+            method,
+            params,
+            ret,
+            doc: doc_string(&fn_item.attrs),
+        });
+    }
+
+    // Canonical verb order, matching `methods_for_route`.
+    let mut ordered = Vec::new();
+    for verb in allowed_methods {
+        if let Some(op) = found.iter().find(|op| op.method == verb) {
+            ordered.push(op.clone());
+        }
+    }
+    ordered
 }
 
 // Collect `route.rs`, `middleware.rs`, `fallback.rs` and `intercept.rs` files
