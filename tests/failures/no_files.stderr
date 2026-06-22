@@ -1,4 +1,4 @@
-error: No route.rs files found in the specified directory: '$DIR/target/tests/trybuild/axum-folder-router/some/non/existing/directory'. Make sure the path is correct and contains route.rs files.
+error: No route.rs or fallback.rs files found in the specified directory: '$DIR/target/tests/trybuild/axum-folder-router/some/non/existing/directory'. Make sure the path is correct and contains at least one route.rs (with an HTTP verb handler) or a fallback.rs (e.g. a ServeDir static server).
  --> tests/failures/no_files.rs:6:1
   |
 6 | #[folder_router("some/non/existing/directory", AppState)]
@@ -6,8 +6,7 @@ error: No route.rs files found in the specified directory: '$DIR/target/tests/tr
   |
   = note: this error originates in the attribute macro `folder_router` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error: No routes defined in your route.rs's !
-       Ensure that at least one `pub async fn` named after an HTTP verb is defined. (e.g. get, post, put, delete)
+error: No routes or fallback defined! Either add a `route.rs` with at least one `pub async fn` named after an HTTP verb (e.g. get, post, put, delete), or add a `fallback.rs` to handle all requests (e.g. a `ServeDir` static file server).
  --> tests/failures/no_files.rs:6:1
   |
 6 | #[folder_router("some/non/existing/directory", AppState)]

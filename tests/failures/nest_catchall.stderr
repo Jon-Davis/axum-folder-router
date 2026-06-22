@@ -1,4 +1,4 @@
-error: a `middleware.rs`/`fallback.rs` subtree cannot be nested at a catch-all path ('/{*rest}'): axum forbids wildcards in a `nest` prefix. Move the middleware/fallback out of the catch-all directory.
+error: a `middleware.rs`/`fallback.rs`/`intercept.rs` subtree cannot be nested at a catch-all path ('/{*rest}'): axum forbids wildcards in a `nest` prefix. Move the middleware/fallback/intercept out of the catch-all directory.
  --> tests/failures/nest_catchall.rs:6:1
   |
 6 | #[folder_router("../../../../tests/failures/nest_catchall", AppState)]

@@ -371,11 +371,13 @@ impl FolderRouterRoutes {
         let path_cow = path.to_string_lossy();
         let path_str = path_cow.as_ref();
 
-        if routes.is_empty() {
+        if routes.is_empty() && raw_fallback.is_empty() {
             errors.extend(quote::quote! {
-                compile_error!(concat!("No route.rs files found in the specified directory: '",
+                compile_error!(concat!(
+                    "No route.rs or fallback.rs files found in the specified directory: '",
                     #path_str,
-                    "'. Make sure the path is correct and contains route.rs files."
+                    "'. Make sure the path is correct and contains at least one route.rs ",
+                    "(with an HTTP verb handler) or a fallback.rs (e.g. a ServeDir static server)."
                 ));
             });
         }

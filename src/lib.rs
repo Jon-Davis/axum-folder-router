@@ -218,6 +218,14 @@ When any ```middleware.rs``` uses this two-argument form, ```into_router``` is
 Routers whose middleware is all state-agnostic keep both ```into_router``` and
 ```into_router_with_state```.
 
+```into_router``` is also withheld when the tree has a *nested* boundary — a
+```middleware.rs```/```fallback.rs```/```intercept.rs``` in a subfolder. Such
+subtrees are mounted with ```Router::nest_service``` (so a request to the bare
+boundary path, with or without a trailing slash, can't slip past the subtree's
+layers into an ancestor fallback), and a service must have its state resolved at
+construction time. Build those with ```into_router_with_state``` even if every
+layer is state-agnostic (pass a trivial state value if nothing reads it).
+
 ## Fallback
 
 A ```fallback.rs``` in any folder declares the fallback for that folder's subtree

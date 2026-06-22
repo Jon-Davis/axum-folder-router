@@ -13,7 +13,7 @@ struct AppState;
 struct NestRouter();
 
 fn app() -> Router {
-    NestRouter::into_router().with_state(AppState)
+    NestRouter::into_router_with_state(AppState)
 }
 
 async fn body(uri: &str) -> String {

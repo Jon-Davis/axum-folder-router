@@ -126,7 +126,7 @@ async fn intercept_only_folder_gates_the_fallback() {
     // it resolve to the inherited root fallback — and the intercept still runs
     // over that fallback-served path, diverting "blocked" and letting others
     // through to the fallback.
-    let app = InterceptOverFallback::into_router().with_state(AppState {
+    let app = InterceptOverFallback::into_router_with_state(AppState {
         marker: String::new(),
     });
 
@@ -137,6 +137,16 @@ async fn intercept_only_folder_gates_the_fallback() {
     let (status, body) = get(app.clone(), "/guarded/open").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, "fallback");
+
+    // The *bare* boundary path (no sub-segment) must also be gated: this is the
+    // `/admin` / `/admin/` case where the only handler is the inherited fallback.
+    let (status, body) = get(app.clone(), "/guarded").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "bare prefix must hit intercept");
+    assert_eq!(body, "guard");
+
+    let (status, body) = get(app.clone(), "/guarded/").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "bare prefix + slash must hit intercept");
+    assert_eq!(body, "guard");
 
     // The intercept is scoped to `guarded/` only; siblings are untouched.
     let (status, body) = get(app.clone(), "/elsewhere").await;

@@ -4,7 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-- Nothing yet
+- **Fix:** a `middleware.rs`/`fallback.rs`/`intercept.rs` no longer skips the bare
+  boundary path when it has a trailing slash. Nested boundaries are now mounted
+  with `Router::nest_service` instead of `Router::nest`, so a request to e.g.
+  `/admin/` (not just `/admin` and `/admin/<sub>`) routes into the subtree and its
+  layers run. Previously the trailing-slash form slipped past the boundary into an
+  ancestor fallback, silently bypassing the guard.
+  - As a consequence, a tree with nested boundaries is built with
+    `into_router_with_state(state)`; `into_router()` is no longer generated for it
+    (a `nest_service` child must have its state resolved at construction). Trees
+    with no nested boundaries are unaffected and keep both constructors.
 
 ## [0.4.1] - 2025-12-30
 - Tiny doc fix

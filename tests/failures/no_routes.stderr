@@ -1,5 +1,4 @@
-error: No routes defined in your route.rs's !
-       Ensure that at least one `pub async fn` named after an HTTP verb is defined. (e.g. get, post, put, delete)
+error: No routes or fallback defined! Either add a `route.rs` with at least one `pub async fn` named after an HTTP verb (e.g. get, post, put, delete), or add a `fallback.rs` to handle all requests (e.g. a `ServeDir` static file server).
  --> tests/failures/no_routes.rs:6:1
   |
 6 | #[folder_router("../../../../tests/failures/no_routes", AppState)]

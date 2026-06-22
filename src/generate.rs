@@ -371,9 +371,9 @@ fn check_catchall(node: &RouteNode, base: &[String], errors: &mut TokenStream) {
                 let prefix = url_from(&child_base);
                 errors.extend(quote! {
                     compile_error!(concat!(
-                        "a `middleware.rs`/`fallback.rs` subtree cannot be nested at a ",
+                        "a `middleware.rs`/`fallback.rs`/`intercept.rs` subtree cannot be nested at a ",
                         "catch-all path ('", #prefix, "'): axum forbids wildcards in a `nest` prefix. ",
-                        "Move the middleware/fallback out of the catch-all directory."
+                        "Move the middleware/fallback/intercept out of the catch-all directory."
                     ));
                 });
             }
@@ -383,6 +383,16 @@ fn check_catchall(node: &RouteNode, base: &[String], errors: &mut TokenStream) {
             check_catchall(child, &child_base, errors);
         }
     }
+}
+
+// Whether any descendant subtree forms a `nest`ed boundary. Such boundaries are
+// mounted with `nest_service` (to fix the trailing-slash bypass), which requires
+// the child's state to be resolved at build time with the `state` value — so a
+// tree with nested boundaries can only be built via `into_router_with_state`, and
+// `into_router()` is not generated for it. (The root boundary itself is the
+// top-level router and is never nested, so it doesn't count.)
+fn has_nested_boundary(node: &RouteNode) -> bool {
+    node.children.values().any(subtree_has_boundary)
 }
 
 // Whether this node or any descendant has a state-aware (`router, state`)
@@ -399,17 +409,37 @@ fn tree_needs_state(node: &RouteNode) -> bool {
 // `fallback` fn (ending in "fallback") plus how it consumes state.
 type FallbackRef = (Vec<String>, MiddlewareKind);
 
-// Emit `router = <ns>::<path>::fallback(router[, state.clone()]);`.
-fn apply_fallback_tokens(mod_namespace: &syn::Path, fb: &FallbackRef) -> TokenStream {
+// Clone the in-scope `state` binding as a value of the state type `S`.
+//
+// Written as a fully qualified `<S as Clone>::clone(&state)` rather than
+// `state.clone()` on purpose: when `S` is a *reference* type like `&'static
+// AppState` (the realistic "build once, leak, pass a pointer" shape), method-call
+// syntax auto-derefs and resolves to `<AppState as Clone>::clone`, producing an
+// owned `AppState` — a deep clone that also fails to type-check against `S`. The
+// qualified form pins `Self = S`, so a reference state copies the pointer and an
+// owned state deep-clones, each correctly typed.
+fn clone_state(state_type: &syn::Type) -> TokenStream {
+    quote! { <#state_type as ::core::clone::Clone>::clone(&state) }
+}
+
+// Emit `router = <ns>::<path>::fallback(router[, <clone of state>]);`.
+fn apply_fallback_tokens(
+    mod_namespace: &syn::Path,
+    fb: &FallbackRef,
+    state_type: &syn::Type,
+) -> TokenStream {
     let (segments, kind) = fb;
     let path = generate_mod_path_tokens(segments);
     match kind {
         MiddlewareKind::Stateless => quote! {
             router = #mod_namespace::#path::fallback(router);
         },
-        MiddlewareKind::Stateful => quote! {
-            router = #mod_namespace::#path::fallback(router, state.clone());
-        },
+        MiddlewareKind::Stateful => {
+            let state = clone_state(state_type);
+            quote! {
+                router = #mod_namespace::#path::fallback(router, #state);
+            }
+        }
     }
 }
 
@@ -451,8 +481,18 @@ fn emit_into(
             }
             let prefix = url_from(&child_base);
             let child_router = boundary_router(child, current_fb, mod_namespace, state_type);
+            let cloned_state = clone_state(state_type);
+            // `nest_service` (not `nest`): a plain `nest` registers the child under
+            // `{prefix}` and `{prefix}/{*rest}`, which leaves the bare boundary path
+            // *with a trailing slash* (`{prefix}/`) unmatched — it falls through to an
+            // ancestor fallback, silently bypassing this subtree's intercept/middleware
+            // layers. Mounting the child as an opaque service makes axum route
+            // `{prefix}`, `{prefix}/` and `{prefix}/{*rest}` all into it, so the layers
+            // run on every form. A service must have its state resolved, so the child is
+            // finalized with a `clone_state` copy here (which is why a tree with nested
+            // boundaries can only be built via `into_router_with_state`).
             body.extend(quote! {
-                router = router.nest(#prefix, #child_router);
+                router = router.nest_service(#prefix, (#child_router).with_state(#cloned_state));
             });
         } else {
             body.extend(emit_into(child, &child_base, current_fb, mod_namespace, state_type));
@@ -525,7 +565,7 @@ fn boundary_router(
     let mut body = emit_into(node, &[], &effective_fb, mod_namespace, state_type);
 
     if let Some(fb) = &effective_fb {
-        body.extend(apply_fallback_tokens(mod_namespace, fb));
+        body.extend(apply_fallback_tokens(mod_namespace, fb, state_type));
     } else if node.children.values().any(subtree_has_fallback) {
         // No fallback in scope, but a descendant defines one: make this router
         // non-transparent so the descendant's fallback isn't overridden.
@@ -554,7 +594,8 @@ fn boundary_router(
         let arg_types: Vec<TokenStream> = sig.params.iter().map(requalify_intercept_type).collect();
 
         let layer = if sig.stateful {
-            quote! { axum::middleware::from_fn_with_state(state.clone(), __folder_router_intercept) }
+            let cloned_state = clone_state(state_type);
+            quote! { axum::middleware::from_fn_with_state(#cloned_state, __folder_router_intercept) }
         } else {
             quote! { axum::middleware::from_fn(__folder_router_intercept) }
         };
@@ -581,9 +622,12 @@ fn boundary_router(
             MiddlewareKind::Stateless => quote! {
                 router = #mod_namespace::#middleware_path::middleware(router);
             },
-            MiddlewareKind::Stateful => quote! {
-                router = #mod_namespace::#middleware_path::middleware(router, state.clone());
-            },
+            MiddlewareKind::Stateful => {
+                let cloned_state = clone_state(state_type);
+                quote! {
+                    router = #mod_namespace::#middleware_path::middleware(router, #cloned_state);
+                }
+            }
         });
     }
 
@@ -608,11 +652,13 @@ pub fn router_impl(
 
     let root = build_route_tree(routes);
 
-    if !has_any_registration(&root) {
+    if !has_any_registration(&root) && !subtree_has_fallback(&root) {
         errors.extend(quote! {
             compile_error!(concat!(
-                "No routes defined in your route.rs's !\n",
-                "Ensure that at least one `pub async fn` named after an HTTP verb is defined. (e.g. get, post, put, delete)"
+                "No routes or fallback defined! ",
+                "Either add a `route.rs` with at least one `pub async fn` named after an HTTP verb ",
+                "(e.g. get, post, put, delete), or add a `fallback.rs` to handle all requests ",
+                "(e.g. a `ServeDir` static file server)."
             ));
         });
     }
@@ -623,8 +669,10 @@ pub fn router_impl(
 
     // `into_router()` (no state value) can't satisfy state-aware middleware, and
     // silently skipping it would be an auth-bypass footgun — so when any exists,
-    // only `into_router_with_state` is generated.
-    let into_router_method = if tree_needs_state(&root) {
+    // only `into_router_with_state` is generated. The same applies when the tree
+    // has nested boundaries: those are mounted with `nest_service`, which bakes the
+    // `state` value into each child at build time.
+    let into_router_method = if tree_needs_state(&root) || has_nested_boundary(&root) {
         TokenStream::new()
     } else {
         quote! {

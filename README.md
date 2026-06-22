@@ -114,6 +114,14 @@ pub async fn intercept(
 Use `intercept.rs` to guard or augment requests on the way in; reach for
 `middleware.rs` when you also need to touch the response on the way out.
 
+A `middleware.rs`/`fallback.rs`/`intercept.rs` in a **subfolder** makes that
+subtree a nested boundary, mounted with `Router::nest_service` so its layers run
+on the bare boundary path in *both* slash forms (`/admin` and `/admin/`) — a
+guard can't be bypassed by a trailing slash. Because a service has its state
+baked in at construction, a tree with nested boundaries is built with
+`into_router_with_state(state)` (not `into_router()`), even when every layer is
+state-agnostic.
+
 ## License
 
 This repository is licensed permissively under the terms of the MIT license.

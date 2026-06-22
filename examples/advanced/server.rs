@@ -6,7 +6,10 @@ struct AppState {
     _foo: String,
 }
 
-// Imports route.rs files & generates an ::into_router() fn
+// Imports route.rs files & generates the router constructor(s). Because this tree
+// has nested boundaries (`users/intercept.rs`), those subtrees are mounted with
+// `nest_service`, which bakes the state value in at build time — so only the
+// state-taking `into_router_with_state` is generated (not the bare `into_router`).
 #[folder_router("examples/advanced/api", AppState)]
 struct MyFolderRouter();
 
@@ -16,11 +19,9 @@ pub async fn server() -> anyhow::Result<()> {
         _foo: String::new(),
     };
 
-    // Use the init fn generated above
-    let folder_router: Router<AppState> = MyFolderRouter::into_router();
-
-    // Build the router and provide the state
-    let app: Router<()> = folder_router.with_state(app_state);
+    // Use the init fn generated above; it consumes the state and returns a ready
+    // `Router<()>`.
+    let app: Router<()> = MyFolderRouter::into_router_with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     println!("Listening on http://{}", listener.local_addr()?);
