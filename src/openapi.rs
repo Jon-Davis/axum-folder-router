@@ -237,8 +237,57 @@ fn split_doc(doc: &str) -> (String, Option<String>) {
 
 // Build an `Operation` expression for one verb handler, pushing any referenced
 // component schemas into `__schemas` along the way.
+// Derive a camelCase `operationId` from an HTTP verb and URL template, e.g.
+// (`get`, `/api/me`) -> `getMe`, (`delete`, `/api/admin/api_keys/{id}`) ->
+// `deleteAdminApiKeysById`. A single leading `api` segment is dropped as noise;
+// path params become a trailing `By<Param>` (joined with `And` when several).
+// The verb prefix keeps ids unique when one URL has multiple verbs.
+fn operation_id(method: &str, url: &str) -> String {
+    let mut segments: Vec<&str> = url.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() > 1 && segments.first() == Some(&"api") {
+        segments.remove(0);
+    }
+
+    let mut name = method.to_string();
+    let mut params: Vec<String> = Vec::new();
+    for seg in segments {
+        if let Some(param) = seg.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+            params.push(pascal_case(param));
+        } else {
+            name.push_str(&pascal_case(seg));
+        }
+    }
+    if !params.is_empty() {
+        name.push_str("By");
+        name.push_str(&params.join("And"));
+    }
+    name
+}
+
+// PascalCase a single path segment, splitting on `_`/`-` (e.g. `api_keys` ->
+// `ApiKeys`).
+fn pascal_case(segment: &str) -> String {
+    segment
+        .split(['_', '-'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
 fn operation_tokens(op: &OperationMeta, url: &str, tag: Option<&str>) -> TokenStream {
     let mut builder = quote! { utoipa::openapi::path::OperationBuilder::new() };
+
+    // A stable `operationId` derived from the verb + URL. Client generators (e.g.
+    // `@hey-api/openapi-ts`) name their generated functions from this, so emitting
+    // it yields predictable SDK names instead of tool-derived fallbacks.
+    let op_id = operation_id(op.method, url);
+    builder = quote! { #builder.operation_id(Some(#op_id)) };
 
     if let Some(t) = tag {
         builder = quote! { #builder.tag(#t) };
